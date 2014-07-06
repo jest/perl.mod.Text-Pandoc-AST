@@ -1,88 +1,115 @@
 package Text::Pandoc::AST::El;
 
-sub from_json_object {
-  my ($jobj) = @_;
+use warnings;
+use strict;
+use Readonly;
+use List::AllUtils qw/ pairwise /;
 
-}
-
-my %DEFS = (
+Readonly::Hash my %DEFS => (
+  'Meta' => sub { return $_[0]->{unMeta} }, # not yet implemented
   'Str' => [
-    v => 'string'
+    [ v => '$' ]
   ],
   'Space' => [ ],
-  'Para' => [
-    elems => '[Inline]'
+  Plain => [
+  	[ txt => '[]' ]
+  ],
+  Para  => [
+    [ txt => '[]' ]
+  ],
+  Header => [
+  	[ level => '$' ],
+  	[ attrs => 'attr' ],
+  	[ txt   => '[]' ]
+  ],
+  CodeBlock => [
+  	[ attrs => 'attr' ],
+  	[ v     => '$'    ]
+  ],
+  BulletList => [
+  	[ items => sub {
+  		my ($jval) = @_;
+  		return [ map { decode_type('[]', $_) } @$jval ];
+  	} ]
+  ],
+  Code => [
+  	[ attrs => 'attr' ],
+  	[ v     => '$'    ]
+  ],
+  
+  # types
+  attr => [
+  	[ id      => '$'  ],
+  	[ classes => '@' ],
+  	[ other   => '@' ]
   ]
 );
-my %CLASSES = (
-  Inline => [ map { $_ => 1 }
-    qw/ Str Space / ],
-  Block => [ map { $_ => 1 }
-    qw/ Para / ]
-);
+
+sub error_el {
+	my ($msg, $jobj) = @_;
+	return {
+		t => 'Error',
+		err_msg => $msg,
+		jobj => $jobj
+	};
+}
 
 sub from_json_object {
-  my ($jobj, $class) = @_;
-  my $def = $DEFS{$jobj->{t}};
-  warn "Unknown type $jobj->{t}" and return
-    unless defined $def;
-
-  if ($class) {
-    warn "Element $jobj->{t} is not of class $class" and return undef
-      unless $jobj->{t} eq $class || exists $CLASSES{$class}{$jobj->{t}};
+  my ($jobj) = @_;
+  
+  if ($jobj->{t} eq 'BulletList') {
+  	warn;
   }
+  if (ref $jobj ne 'HASH') {
+  	die;
+  }
+  my $def = $DEFS{$jobj->{t}};
+  return error_el("Unknown type $jobj->{t}", $jobj) unless defined $def;
 
   my $el = el($def, $jobj->{c}) or return;
-  $el->{t} = $jobj->{t};
+  $el->{t} = $jobj->{t} unless exists $el->{t};
 
   $el;
+}
+
+sub from_json_type {
+	my ($jobj, $jtype) = @_;
+	my $def = $DEFS{$jtype} or die "Unknown type is specification: $jtype";
+	
+	return el($def, $jobj);
 }
 
 sub el {
   my ($defs, $data) = @_;
   if (@$defs == 0) {
-    if (ref $data eq 'ARRAY' && @$data == 0) {
-      return { }
-    }
-    warn "Expected empty array";
-    return undef;
-  } elsif (@$defs == 2 && $defs->[1] eq 'string') {
-    if (ref $data ne '') {
-      warn "Expected simple scalar";
-      return undef;
-    }
+    return (ref $data eq 'ARRAY' && @$data == 0) ? { } : error_el("Expected empty array", $data);
+  } elsif (@$defs == 1) {
     $data = [ $data ];
   }
-  if (2 * @$data != @$defs) {
-    warn "Expected " . int(@$defs) . " elements but got " . int(@$data);
-    return undef;
+  if (@$data != @$defs) {
+  	return error_el("Expected " . int(@$defs) . " elements but got " . int(@$data), $data);
   }
-  my $obj = { };
-  for my $jval (@$data) {
-    my $key  = shift @$def;
-    my $type = shift @$def;
-
-    $obj->{$key} = decode_type($type, $jval);
-  }
-  return $obj;
+  my %obj = pairwise { $a->[0] => decode_type($a->[1], $b) } @$defs, @$data;
+  return \%obj;
 }
 
 sub decode_type {
   my ($jtype, $jval) = @_;
-  if ($jtype eq 'string') {
-    warn "Expected simple scalar" and return undef
-      unless ref $jval eq '';
-    return $jval;
+  if (ref $jtype eq 'CODE') {
+  	return $jtype->($jval);
+  } elsif ($jtype eq '$') {
+  	return (ref $jval eq '') ? $jval : error_el("Expected simple scalar", $jval);
+  } elsif ($jtype eq '@') {
+  	return (ref $jval eq 'ARRAY') ? $jval : error_el("Expected array ref", $jval);
+  } elsif ($jtype eq '[]') {
+    return (ref $jval eq 'ARRAY')
+    	? [ map { from_json_object($_) } @$jval ]
+    	: error_el("Expected array ref", $jval);
   } elsif ($jtype =~ /^[A-Z]/) {
-    return from_json_object($jval, $jtype);
-  } elsif ($jtype =~ /^\[(.*)\]$/) {
-    my $class = $1;
-    warn "Expected array ref" and return undef
-      unless ref $jval eq 'ARRAY';
-    return [
-      map { from_json_objects($_, $class) } @$jval
-    ];
+    return from_json_object($jval);
+  } elsif ($jtype =~ /^[a-z]/) {
+  	return from_json_type($jval, $jtype);
   } else {
-    warn "Can't decode type $jtype";
+    return error_el("Can't decode type $jtype", $jval);
   }
 }
